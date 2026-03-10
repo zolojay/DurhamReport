@@ -548,24 +548,29 @@ def build_hc_geometry(ws):
         # Length, Cells A, Cells B, Width A, Width B, Plugged (cols 5-10)
         for c in range(5, 11):
             input_cell(ws, r, c)
-        # Status (col K=11)
-        output_cell(ws, r, 11)
+        # Status (col K=11) — references Geometry Calc layer active flag (row 18)
+        gc_layer_col = get_column_letter(2 + layer)  # C-H for layers 1-6
+        output_cell(ws, r, 11,
+            f"=IF('Geometry Calc'!{gc_layer_col}18,\"Active\",\"\")")
         ws.row_dimensions[r].height = RH_DATA
 
-    # Convenience Outputs
+    # Convenience Outputs — reference Geometry Calc engine
     apply_section_header(ws, 13, 2, 5, "Resolved Outputs (read-only)", level="sub")
-    outputs = [
-        "Total Active Layers", "Avg Adjusted FFA (m²)",
-        "Total Adjusted Area (m²)", "Pitch (mm)", "Hydraulic Diameter (mm)",
+    hc_outputs = [
+        ("Total Active Layers",      "=GC_ActiveLayers"),
+        ("Avg Adjusted FFA (m²)",    "=GC_AvgAdjFFA"),
+        ("Total Adjusted Area (m²)", "=GC_TotalAdjArea"),
+        ("Pitch (mm)",               "='Geometry Calc'!C21"),
+        ("Hydraulic Diameter (mm)",  "='Geometry Calc'!C22"),
     ]
-    for i, lbl in enumerate(outputs):
+    for i, (lbl, formula) in enumerate(hc_outputs):
         r = 14 + i
         label_cell(ws, r, 2, lbl)
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
         for c2 in range(2, 4):
             ws.cell(row=r, column=c2).fill = FILLS["label"]
             ws.cell(row=r, column=c2).border = THIN_BORDER
-        output_cell(ws, r, 4)
+        output_cell(ws, r, 4, formula)
         ws.row_dimensions[r].height = RH_DATA
 
     # Navigation
@@ -697,20 +702,22 @@ def build_corrugated_geometry(ws):
             input_cell(ws, r, c)
         ws.row_dimensions[r].height = RH_DATA
 
-    # Resolved Outputs
+    # Resolved Outputs — reference Geometry Calc engine
     apply_section_header(ws, 11, 2, 5, "Resolved Outputs (read-only)", level="sub")
-    outputs = [
-        "Total Active Layers", "Avg Adjusted FFA (m²)",
-        "Total Adjusted Area (m²)", "Active Volume (m³)",
+    cr_outputs = [
+        ("Total Active Layers",      "=GC_ActiveLayers"),
+        ("Avg Adjusted FFA (m²)",    "=GC_AvgAdjFFA"),
+        ("Total Adjusted Area (m²)", "=GC_TotalAdjArea"),
+        ("Active Volume (m³)",       "='Geometry Calc'!C74"),
     ]
-    for i, lbl_text in enumerate(outputs):
+    for i, (lbl_text, formula) in enumerate(cr_outputs):
         r = 12 + i
         label_cell(ws, r, 2, lbl_text)
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
         for c2 in range(2, 4):
             ws.cell(row=r, column=c2).fill = FILLS["label"]
             ws.cell(row=r, column=c2).border = THIN_BORDER
-        output_cell(ws, r, 4)
+        output_cell(ws, r, 4, formula)
         ws.row_dimensions[r].height = RH_DATA
 
     # Navigation
@@ -1137,28 +1144,424 @@ def build_dp(ws):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def build_geometry_calc(ws):
-    set_col_widths(ws, {"A": 3, "B": 30, "C": 20, "D": 20, "E": 3})
+    """
+    Phase 2 — Full Geometry Calc engine with real formulas.
 
-    apply_section_header(ws, 1, 2, 4, "Geometry Calc Engine", level="title")
+    Cell map for upstream references:
+      Home!C15:D15=AV  C16:D16=UGS  C17:D17=Temp  C18:D18=H2O  C19:D19=O2
+      Home!C20:D20=SO2  C21:D21=SO3  C22:D22=NOx  C23:D23=MR
+      HC Geometry rows 5-10: C=ProdType D=APOverride E=Length F=CellsA
+                             G=CellsB H=WidthA I=WidthB J=Plugged K=Status
+      Plate Geometry: C3=TotalPlates, Box1 rows 7-19, Box2 rows 24-36
+                      C=Length D=Thickness E=WidthA F=WidthB
+                      Row20=Box1Avg, Row37=Box2Avg, Rows40-43=CombinedSummary col D
+      Corrugated rows 4-9: C=SSA D=Length E=Width F=Height G=TotalCells H=Plugged
+    """
+    set_col_widths(ws, {
+        "A": 3, "B": 32, "C": 22, "D": 22, "E": 22,
+        "F": 22, "G": 22, "H": 22, "I": 22, "J": 22, "K": 22,
+    })
 
-    sections = [
-        (3,  "Active Geometry / Mode Selection"),
-        (8,  "Unified Geometry Outputs"),
-        (16, "Honeycomb Calculations"),
-        (24, "Plate Calculations"),
-        (32, "Corrugated Calculations"),
-        (40, "Flow Calculations"),
-        (50, "Injection Rate Calculations"),
-        (60, "Shared Resolved Outputs"),
+    apply_section_header(ws, 1, 2, 8, "Geometry Calc Engine", level="title")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 1: Active Geometry / Mode Selection (rows 3-6)
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 3, 2, 8, "Active Geometry / Mode Selection", level="section")
+    label_cell(ws, 4, 2, "Active Geometry Type")
+    output_cell(ws, 4, 3, "=Ctrl_ActiveGeometryType")
+    label_cell(ws, 5, 2, "Is HC")
+    output_cell(ws, 5, 3, '=IF(C4="HC",TRUE,FALSE)')
+    label_cell(ws, 6, 2, "Is Plate")
+    output_cell(ws, 6, 3, '=IF(C4="Plate",TRUE,FALSE)')
+    label_cell(ws, 7, 2, "Is Corrugated")
+    output_cell(ws, 7, 3, '=IF(C4="Corrugated",TRUE,FALSE)')
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 2: Honeycomb Calculations (rows 9-30)
+    # Per-layer calcs in columns C-K for layers 1-6
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 9, 2, 2, "Honeycomb Per-Layer Calculations", level="section")
+
+    # Sub-headers for the per-layer calc block
+    hc_calc_labels = [
+        "HC_Length (mm)",           # row 11
+        "HC_CellsA",               # row 12
+        "HC_CellsB",               # row 13
+        "HC_WidthA (mm)",          # row 14
+        "HC_WidthB (mm)",          # row 15
+        "HC_PluggedCells",         # row 16
+        "HC_APOverride",           # row 17
+        "HC_Layer_Active",         # row 18
+        "HC_TotalCells",           # row 19
+        "HC_OpenCells",            # row 20
+        "HC_Pitch (mm)",           # row 21
+        "HC_ChannelWidth (mm)",    # row 22  (Pitch - WallThickness)
+        "HC_FFA_fraction",         # row 23
+        "HC_CrossSection (m²)",    # row 24
+        "HC_AdjFFA",               # row 25
+        "HC_LayerArea (m²)",       # row 26  (FFA * CrossSection adj)
+        "HC_LayerVolume (m³)",     # row 27
+        "HC_LayerSurfaceArea (m²)",# row 28
     ]
-    for r, title in sections:
-        apply_section_header(ws, r, 2, 4, title, level="section")
 
-    # GC_ output cells
-    for i, name in enumerate(GC_NAMED_RANGES):
-        r = 61 + i
+    # Column headers row 10: B=Label, C-H = Layer 1-6
+    layer_hdrs = ["Layer 1", "Layer 2", "Layer 3", "Layer 4", "Layer 5", "Layer 6"]
+    label_cell(ws, 10, 2, "Parameter")
+    for i, lh in enumerate(layer_hdrs):
+        c = ws.cell(row=10, column=3 + i, value=lh)
+        c.font = FONT_COL_HDR
+        c.fill = FILLS["column_header"]
+        c.alignment = ALIGN_CENTER
+        c.border = THIN_BORDER
+
+    HC = "'HC Geometry'"
+    for row_offset, lbl in enumerate(hc_calc_labels):
+        r = 11 + row_offset
+        label_cell(ws, r, 2, lbl)
+        ws.row_dimensions[r].height = RH_DATA
+
+    # Now write formulas for each layer (columns C=3 through H=8, layers 1-6)
+    # HC Geometry input rows are 5-10, so layer i → HC row (4+i)
+    for li in range(6):  # layer index 0-5
+        col = 3 + li          # C=3..H=8
+        hc_row = 5 + li       # HC Geometry rows 5-10
+        E = f"{HC}!E{hc_row}"  # Length
+        F = f"{HC}!F{hc_row}"  # CellsA
+        G = f"{HC}!G{hc_row}"  # CellsB
+        H = f"{HC}!H{hc_row}"  # WidthA
+        I = f"{HC}!I{hc_row}"  # WidthB
+        J = f"{HC}!J{hc_row}"  # Plugged
+        D = f"{HC}!D{hc_row}"  # AP Override
+        cl = get_column_letter(col)
+
+        # Row 11: Length
+        output_cell(ws, 11, col, f"={E}")
+        # Row 12: CellsA
+        output_cell(ws, 12, col, f"={F}")
+        # Row 13: CellsB
+        output_cell(ws, 13, col, f"={G}")
+        # Row 14: WidthA
+        output_cell(ws, 14, col, f"={H}")
+        # Row 15: WidthB
+        output_cell(ws, 15, col, f"={I}")
+        # Row 16: Plugged
+        output_cell(ws, 16, col, f"={J}")
+        # Row 17: AP Override
+        output_cell(ws, 17, col, f"={D}")
+        # Row 18: Layer Active = Length>0 AND CellsA>0 AND CellsB>0
+        output_cell(ws, 18, col,
+            f'=AND({cl}11>0,{cl}12>0,{cl}13>0)')
+        # Row 19: TotalCells = CellsA × CellsB
+        output_cell(ws, 19, col,
+            f'=IF({cl}18,{cl}12*{cl}13,0)')
+        # Row 20: OpenCells = TotalCells - Plugged
+        output_cell(ws, 20, col,
+            f'=IF({cl}18,{cl}19-{cl}16,0)')
+        # Row 21: Pitch = WidthA / CellsA
+        output_cell(ws, 21, col,
+            f'=IF({cl}18,{cl}14/{cl}12,0)')
+        # Row 22: ChannelWidth = Pitch - 1.0 (default wall thickness 1mm)
+        output_cell(ws, 22, col,
+            f'=IF({cl}18,{cl}21-1,0)')
+        # Row 23: FFA fraction = (ChannelWidth/Pitch)^2
+        output_cell(ws, 23, col,
+            f'=IF(AND({cl}18,{cl}21>0),({cl}22/{cl}21)^2,0)')
+        # Row 24: CrossSection = (WidthA/1000) × (WidthB/1000)
+        output_cell(ws, 24, col,
+            f'=IF({cl}18,({cl}14/1000)*({cl}15/1000),0)')
+        # Row 25: AdjFFA = FFA × (OpenCells/TotalCells)
+        output_cell(ws, 25, col,
+            f'=IF(AND({cl}18,{cl}19>0),{cl}23*({cl}20/{cl}19),0)')
+        # Row 26: LayerArea = CrossSection × AdjFFA (free-flow area, m²)
+        output_cell(ws, 26, col,
+            f'=IF({cl}18,{cl}24*{cl}25,0)')
+        # Row 27: LayerVolume = CrossSection × (Length/1000)
+        output_cell(ws, 27, col,
+            f'=IF({cl}18,{cl}24*({cl}11/1000),0)')
+        # Row 28: LayerSurfaceArea = AP × LayerVolume
+        output_cell(ws, 28, col,
+            f'=IF(AND({cl}18,{cl}17>0),{cl}17*{cl}27,0)')
+
+    # HC Rollup (rows 30-32)
+    apply_section_header(ws, 30, 2, 2, "Honeycomb Rollup", level="section")
+    label_cell(ws, 31, 2, "HC_ActiveLayers")
+    output_cell(ws, 31, 3, "=COUNTIF(C18:H18,TRUE)")
+    label_cell(ws, 32, 2, "HC_AvgAdjFFA (m²)")
+    output_cell(ws, 32, 3, "=IF(C31>0,AVERAGEIF(C18:H18,TRUE,C26:H26),0)")
+    label_cell(ws, 33, 2, "HC_TotalAdjArea (m²)")
+    output_cell(ws, 33, 3, "=SUMIF(C18:H18,TRUE,C28:H28)")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 3: Plate Calculations (rows 34-44)
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 35, 2, 2, "Plate Calculations", level="section")
+    PL = "'Plate Geometry'"
+
+    plate_calcs = [
+        ("PL_TotalPlates",            f"={PL}!C3"),                                # 36
+        ("PL_AvgLength (mm)",         f"={PL}!D40"),                               # 37
+        ("PL_AvgThickness (mm)",      f"={PL}!D41"),                               # 38
+        ("PL_AvgWidthA (mm)",         f"={PL}!D42"),                               # 39
+        ("PL_AvgWidthB (mm)",         f"={PL}!D43"),                               # 40
+        ("PL_ActiveLayers",           "=IF(C36>1,C36-1,0)"),                       # 41
+        ("PL_PlateSpacing (mm)",      "=C38"),                                     # 42
+        ("PL_HydDiam (mm)",           "=2*C42"),                                   # 43
+        ("PL_ChannelHeight (m)",      "=C39/1000"),                                # 44
+        ("PL_SingleChannelArea (m²)", "=(C37/1000)*C44"),                          # 45
+        ("PL_FFA (m²)",              "=C41*(C42/1000)*(C40/1000)"),                # 46
+        ("PL_TotalSurfaceArea (m²)", "=2*C41*C45"),                                # 47
+    ]
+    for i, (lbl, formula) in enumerate(plate_calcs):
+        r = 36 + i
+        label_cell(ws, r, 2, lbl)
+        output_cell(ws, r, 3, formula)
+        ws.row_dimensions[r].height = RH_DATA
+
+    # Plate Rollup (rows 49-51)
+    apply_section_header(ws, 49, 2, 2, "Plate Rollup", level="section")
+    label_cell(ws, 50, 2, "PL_ActiveLayers")
+    output_cell(ws, 50, 3, "=C41")
+    label_cell(ws, 51, 2, "PL_AvgAdjFFA (m²)")
+    output_cell(ws, 51, 3, "=C46")
+    label_cell(ws, 52, 2, "PL_TotalAdjArea (m²)")
+    output_cell(ws, 52, 3, "=C47")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 4: Corrugated Calculations (rows 53-72)
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 54, 2, 2, "Corrugated Per-Layer Calculations", level="section")
+
+    corr_calc_labels = [
+        "CR_SSA (m²/m³)",       # row 56
+        "CR_Length (mm)",        # row 57
+        "CR_Width (mm)",         # row 58
+        "CR_Height (mm)",        # row 59
+        "CR_TotalCells",         # row 60
+        "CR_PluggedCells",       # row 61
+        "CR_Layer_Active",       # row 62
+        "CR_OpenCells",          # row 63
+        "CR_OpenFraction",       # row 64
+        "CR_LayerVolume (m³)",   # row 65
+        "CR_LayerSurfArea (m²)", # row 66
+        "CR_CrossSection (m²)",  # row 67
+        "CR_LayerFFA (m²)",      # row 68
+    ]
+
+    # Column headers row 55 for layers
+    label_cell(ws, 55, 2, "Parameter")
+    for i, lh in enumerate(layer_hdrs):
+        c = ws.cell(row=55, column=3 + i, value=lh)
+        c.font = FONT_COL_HDR
+        c.fill = FILLS["column_header"]
+        c.alignment = ALIGN_CENTER
+        c.border = THIN_BORDER
+
+    for row_offset, lbl in enumerate(corr_calc_labels):
+        r = 56 + row_offset
+        label_cell(ws, r, 2, lbl)
+        ws.row_dimensions[r].height = RH_DATA
+
+    CR = "'Corrugated Geometry'"
+    for li in range(6):
+        col = 3 + li
+        cr_row = 4 + li  # Corrugated input rows 4-9
+        cC = f"{CR}!C{cr_row}"  # SSA
+        cD = f"{CR}!D{cr_row}"  # Length
+        cE = f"{CR}!E{cr_row}"  # Width
+        cF = f"{CR}!F{cr_row}"  # Height
+        cG = f"{CR}!G{cr_row}"  # TotalCells
+        cH = f"{CR}!H{cr_row}"  # Plugged
+        cl = get_column_letter(col)
+
+        output_cell(ws, 56, col, f"={cC}")      # SSA
+        output_cell(ws, 57, col, f"={cD}")      # Length
+        output_cell(ws, 58, col, f"={cE}")      # Width
+        output_cell(ws, 59, col, f"={cF}")      # Height
+        output_cell(ws, 60, col, f"={cG}")      # TotalCells
+        output_cell(ws, 61, col, f"={cH}")      # Plugged
+        # Active
+        output_cell(ws, 62, col,
+            f'=AND({cl}57>0,{cl}58>0,{cl}59>0)')
+        # OpenCells
+        output_cell(ws, 63, col,
+            f'=IF({cl}62,{cl}60-{cl}61,0)')
+        # OpenFraction
+        output_cell(ws, 64, col,
+            f'=IF(AND({cl}62,{cl}60>0),{cl}63/{cl}60,0)')
+        # LayerVolume
+        output_cell(ws, 65, col,
+            f'=IF({cl}62,({cl}57/1000)*({cl}58/1000)*({cl}59/1000),0)')
+        # LayerSurfaceArea = SSA × Volume × OpenFraction
+        output_cell(ws, 66, col,
+            f'=IF({cl}62,{cl}56*{cl}65*{cl}64,0)')
+        # CrossSection = (Width/1000) × (Height/1000)
+        output_cell(ws, 67, col,
+            f'=IF({cl}62,({cl}58/1000)*({cl}59/1000),0)')
+        # LayerFFA = CrossSection × OpenFraction
+        output_cell(ws, 68, col,
+            f'=IF({cl}62,{cl}67*{cl}64,0)')
+
+    # Corrugated Rollup (rows 70-73)
+    apply_section_header(ws, 70, 2, 2, "Corrugated Rollup", level="section")
+    label_cell(ws, 71, 2, "CR_ActiveLayers")
+    output_cell(ws, 71, 3, "=COUNTIF(C62:H62,TRUE)")
+    label_cell(ws, 72, 2, "CR_AvgAdjFFA (m²)")
+    output_cell(ws, 72, 3, "=IF(C71>0,AVERAGEIF(C62:H62,TRUE,C68:H68),0)")
+    label_cell(ws, 73, 2, "CR_TotalAdjArea (m²)")
+    output_cell(ws, 73, 3, "=SUMIF(C62:H62,TRUE,C66:H66)")
+    label_cell(ws, 74, 2, "CR_ActiveVolume (m³)")
+    output_cell(ws, 74, 3, "=SUMIF(C62:H62,TRUE,C65:H65)")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 5: Unified Geometry Outputs (rows 74-78)
+    # Switch on geometry type to pick HC / Plate / Corrugated rollups
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 76, 2, 2, "Unified Geometry Outputs", level="section")
+
+    # HC rollup: rows 31-33, Plate rollup: rows 50-52, Corrugated rollup: rows 71-74
+    label_cell(ws, 77, 2, "Unified_ActiveLayers")
+    output_cell(ws, 77, 3,
+        '=IF(C5,C31,IF(C6,C50,IF(C7,C71,0)))')
+    label_cell(ws, 78, 2, "Unified_AvgAdjFFA (m²)")
+    output_cell(ws, 78, 3,
+        '=IF(C5,C32,IF(C6,C51,IF(C7,C72,0)))')
+    label_cell(ws, 79, 2, "Unified_TotalAdjArea (m²)")
+    output_cell(ws, 79, 3,
+        '=IF(C5,C33,IF(C6,C52,IF(C7,C73,0)))')
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 6: Flow Calculations (rows 80-102)
+    # AV/UGS mutual derivation per test type (Activity & Conversion)
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 81, 2, 2, "Flow Calculations", level="section")
+
+    # Column headers row 82: B=Label, C=Activity, D=Conversion
+    label_cell(ws, 82, 2, "Parameter")
+    for ci, lh in [(3, "Activity"), (4, "Conversion")]:
+        c = ws.cell(row=82, column=ci, value=lh)
+        c.font = FONT_COL_HDR
+        c.fill = FILLS["column_header"]
+        c.alignment = ALIGN_CENTER
+        c.border = THIN_BORDER
+
+    HOME = "'Home'"
+    # Unified outputs: C78=AvgAdjFFA, C79=TotalAdjArea
+    flow_rows = [
+        (83, "Input AV",               f"={HOME}!C15",  f"={HOME}!D15"),
+        (84, "Input UGS",              f"={HOME}!C16",  f"={HOME}!D16"),
+        (85, "Has AV",                 '=C83<>""',      '=D83<>""'),
+        (86, "Has UGS",                '=C84<>""',      '=D84<>""'),
+        (87, "Both Given",             '=AND(C85,C86)',  '=AND(D85,D86)'),
+        (88, "Neither Given",          '=AND(NOT(C85),NOT(C86))',
+                                       '=AND(NOT(D85),NOT(D86))'),
+        # Flow from AV: Flow = AV × TotalAdjArea
+        (89, "Flow_from_AV (Nm³/h)",   '=IF(C85,C83*C79,"")',
+                                        '=IF(D85,D83*C79,"")'),
+        # Flow from UGS: Flow = UGS × AvgAdjFFA × 3600
+        (90, "Flow_from_UGS (Nm³/h)",  '=IF(C86,C84*C78*3600,"")',
+                                        '=IF(D86,D84*C78*3600,"")'),
+        # Resolved Flow: AV takes priority
+        (91, "Resolved_Flow (Nm³/h)",
+            '=IF(C88,"",IF(C85,C89,C90))',
+            '=IF(D88,"",IF(D85,D89,D90))'),
+        # Resolved AV
+        (92, "Resolved_AV",
+            '=IF(C88,"",IF(C85,C83,IF(AND(C86,C79>0),C91/C79,"")))',
+            '=IF(D88,"",IF(D85,D83,IF(AND(D86,C79>0),D91/C79,"")))'),
+        # Derived UGS (when AV was given)
+        (93, "Resolved_UGS",
+            '=IF(C88,"",IF(C86,C84,IF(AND(C85,C78>0),C91/C78/3600,"")))',
+            '=IF(D88,"",IF(D86,D84,IF(AND(D85,C78>0),D91/C78/3600,"")))'),
+        # Flow in scfm
+        (94, "Resolved_Flow_scfm",
+            '=IF(C91<>"",C91*Nm3_to_scfm_Factor,"")',
+            '=IF(D91<>"",D91*Nm3_to_scfm_Factor,"")'),
+        # Flow Status
+        (95, "Flow_Status",
+            '=IF(C88,"Awaiting input",IF(C87,"AV (both given)",IF(C85,"AV \u2192 Flow","UGS \u2192 Flow")))',
+            '=IF(D88,"Awaiting input",IF(D87,"AV (both given)",IF(D85,"AV \u2192 Flow","UGS \u2192 Flow")))'),
+    ]
+    for r, lbl, f_act, f_conv in flow_rows:
+        label_cell(ws, r, 2, lbl)
+        output_cell(ws, r, 3, f_act)
+        output_cell(ws, r, 4, f_conv)
+        ws.row_dimensions[r].height = RH_DATA
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 7: Injection Rate Calculations (rows 95-106)
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 97, 2, 2, "Injection Rate Calculations", level="section")
+    label_cell(ws, 98, 2, "Parameter")
+    for ci, lh in [(3, "Activity"), (4, "Conversion")]:
+        c = ws.cell(row=98, column=ci, value=lh)
+        c.font = FONT_COL_HDR
+        c.fill = FILLS["column_header"]
+        c.alignment = ALIGN_CENTER
+        c.border = THIN_BORDER
+
+    # Input conditions from Home; resolved flow is at row 91
+    inj_rows = [
+        (99,  "Target SO₃ (ppmvd)",   f"={HOME}!C21",  f"={HOME}!D21"),
+        (100, "Target SO₂ (ppmvd)",   f"={HOME}!C20",  f"={HOME}!D20"),
+        (101, "Target NOx (ppmvd)",   f"={HOME}!C22",  f"={HOME}!D22"),
+        (102, "Target MR",            f"={HOME}!C23",  f"={HOME}!D23"),
+        (103, "Derived NH₃ (ppmvd)",
+            '=IF(AND(C102<>"",C101<>""),C102*C101,"")',
+            '=IF(AND(D102<>"",D101<>""),D102*D101,"")'),
+        # SO3 Injection = SO3_ppmvd × Flow / 60
+        (104, "SO₃ Inj (mL/min)",
+            '=IF(AND(C99<>"",C91<>""),C99*C91/60,"")',
+            '=IF(AND(D99<>"",D91<>""),D99*D91/60,"")'),
+        # NH3 Injection = NH3_ppmvd × Flow / 60
+        (105, "NH₃ Inj (mL/min)",
+            '=IF(AND(C103<>"",C91<>""),C103*C91/60,"")',
+            '=IF(AND(D103<>"",D91<>""),D103*D91/60,"")'),
+        # SO2 Injection = SO2_ppmvd × Flow / 60
+        (106, "SO₂ Inj (mL/min)",
+            '=IF(AND(C100<>"",C91<>""),C100*C91/60,"")',
+            '=IF(AND(D100<>"",D91<>""),D100*D91/60,"")'),
+    ]
+    for r, lbl, f_act, f_conv in inj_rows:
+        label_cell(ws, r, 2, lbl)
+        output_cell(ws, r, 3, f_act)
+        output_cell(ws, r, 4, f_conv)
+        ws.row_dimensions[r].height = RH_DATA
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section 8: Shared Resolved Outputs (rows 105+)
+    # These are the GC_ named-range targets
+    # ═══════════════════════════════════════════════════════════════════════
+    apply_section_header(ws, 108, 2, 2, "Shared Resolved Outputs (GC_ Named Ranges)", level="section")
+
+    # Map GC_ names to their formulas — row 109 onward
+    # Unified: C77=ActiveLayers, C78=AvgAdjFFA, C79=TotalAdjArea
+    # Flow: C91=ResolvedFlow, D91=ConvFlow, C92=AV, D92=AV, C93=UGS, D93=UGS
+    #       C94=scfm, D94=scfm, C95=Status, D95=Status
+    # Inj:  C104=SO3, C105=NH3, C106=SO2 (D cols for Conv)
+    gc_formulas = [
+        ("GC_AvgAdjFFA",           "=C78"),                    # 109
+        ("GC_TotalAdjArea",        "=C79"),                    # 110
+        ("GC_ActiveLayers",        "=C77"),                    # 111
+        ("GC_Flow_Act_Nm3h",       "=C91"),                    # 112
+        ("GC_Flow_Conv_Nm3h",      "=D91"),                    # 113
+        ("GC_Flow_Act_scfm",       "=C94"),                    # 114
+        ("GC_Flow_Conv_scfm",      "=D94"),                    # 115
+        ("GC_AV_Act",              "=C92"),                    # 116
+        ("GC_AV_Conv",             "=D92"),                    # 117
+        ("GC_Flow_Act_Status",     "=C95"),                    # 118
+        ("GC_Flow_Conv_Status",    "=D95"),                    # 119
+        ("GC_SO3_Inj_Act",        "=C104"),                   # 120
+        ("GC_SO3_Inj_Conv",       "=D104"),                   # 121
+        ("GC_NH3_Inj_Act",        "=C105"),                   # 122
+        ("GC_NH3_Inj_Conv",       "=D105"),                   # 123
+        ("GC_SO2_Inj_Act",        "=C106"),                   # 124
+        ("GC_SO2_Inj_Conv",       "=D106"),                   # 125
+    ]
+    for i, (name, formula) in enumerate(gc_formulas):
+        r = 109 + i
         label_cell(ws, r, 2, name)
-        output_cell(ws, r, 3)
+        output_cell(ws, r, 3, formula)
         ws.row_dimensions[r].height = RH_DATA
 
 
@@ -1255,9 +1658,9 @@ def create_named_ranges(wb):
         dn = DefinedName(name, attr_text=f"'Constants'!$C${r}")
         wb.defined_names.add(dn)
 
-    # GC_ ranges
+    # GC_ ranges — output block starts at row 109
     for i, name in enumerate(GC_NAMED_RANGES):
-        r = 61 + i
+        r = 109 + i
         dn = DefinedName(name, attr_text=f"'Geometry Calc'!$C${r}")
         wb.defined_names.add(dn)
 
